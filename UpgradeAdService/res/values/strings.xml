@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+	<string name="app_name">UpgradeAdService</string>
+	<string name="hello_world">Hello world!</string>
+	<string name="btn1">start-service</string>
+	<string name="btn2">broadcast</string>
+	<string name="btn3">stop-servic3</string>
+	<string name="btn4">update logo</string>
+
+</resources>
