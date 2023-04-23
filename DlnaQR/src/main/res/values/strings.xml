@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">DlnaQR</string>
+    <string name="text_title">手机投大屏，看片更轻松</string>
+    <string name="text_title_fir">手机连接投屏WIFI</string>
+    <string name="text_title_sed">打开手机视频投屏</string>
+    <string name="text_details">方式①：\n手动输入投屏WIFI、密码，连接网络。\n方式②：\n安卓手机：使用手机相机扫描二维码连网\n苹果手机：使用支付宝扫一扫或手机相机扫描二维码连网\n</string>
+    <string name="text_details1">方式①：</string>
+    <string name="text_details1_info">手动输入投屏WIFI、密码，连接网络。</string>
+    <string name="text_details2">方式②：</string>
+    <string name="text_details2_android">安卓手机：使用手机相机扫描二维码连网</string>
+    <string name="text_details2_ios">苹果手机：使用支付宝扫一扫或手机相机扫描二维码连网\n</string>
+    <string name="text_details2_android_ios">安卓手机：使用手机相机扫描二维码连网\n苹果手机：使用支付宝扫一扫或手机相机扫描二维码连网\n</string>
+    <string name="text_details_tips">手机打开优酷、爱奇艺、腾讯等视频应用，点击  选择“智慧投屏”，投屏播放成功</string>
+    <string name="ssidname">投屏WIFI：</string>
+    <string name="ssidpwd"> 密码：</string>
+    <string name="keyback_info">投屏应用退出中，请稍后</string>
+    <string name="itv_preparing">ITV准备中，请稍后</string>
+</resources>
