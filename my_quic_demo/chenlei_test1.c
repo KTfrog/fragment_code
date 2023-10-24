@@ -500,7 +500,7 @@ int main(int argc, char** argv)
     lsquic_engine_process_conns(engine);  // 4. will fire callback fucntion cl_packets_out
     int count = 30;
     do {
-        //usleep(50000);
+        usleep(50000);
         client_read_net_data(sockfd);
         // 执行3次cl_packets_out/client_read_net_data，由lsquic_engine_packet_in函数才触发On new stream， 原因？？
 
@@ -510,15 +510,6 @@ int main(int argc, char** argv)
         count--;
     } while(count>0);
 
-    //usleep(50000);
-    // PRINT("func:%s, line:%d. --------------------------\n", __func__, __LINE__);
-    // lsquic_stream_wantwrite(g_cl_client_ctx->stream_h->stream, 0);
-    // lsquic_stream_wantread(g_cl_client_ctx->stream_h->stream, 1);
-    // client_read_net_data(sockfd);
-    //PRINT("func:%s, line:%d. client_read_net_data\n", __func__, __LINE__);
-    //while (1) {
-        //client_read_local_data();
-    //}
 
 finish:
     PRINT("func:%s, line:%d. finish\n", __func__, __LINE__);
