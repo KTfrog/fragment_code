@@ -693,7 +693,6 @@ int main(int argc, char** argv)
                 sleep_time = 2000000;
                 count--;
             }
-            usleep(sleep_time);
         }
         else {
             sleep_time = 1000;

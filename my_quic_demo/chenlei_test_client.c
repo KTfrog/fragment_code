@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <netinet/ip.h>
@@ -82,6 +83,7 @@ struct lsquic_stream_ctx {
 lsquic_conn_ctx_t* g_lsquic_conn_ctx;
 struct cl_client_ctx* g_cl_client_ctx;
 static int s_is_lsq_hsk_ok = 0;
+static int s_is_send_finished = 0;
 void client_read_local_data();
 
 static lsquic_conn_ctx_t *
@@ -169,12 +171,23 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
     client_read_local_data();
 #endif
 #if READ_LOCAL_FILE
+    // 打开文件这些初始化代码应该放在别的位置
     FILE *fp;
     fp = fopen("video.ts" , "r");
     if (fp == NULL) {
         perror("open video.ts failed!\n");
         return;
     }
+    struct stat fileStat;
+    if (fstat(fileno(fp), &fileStat) == -1) {  
+        printf("获取文件状态失败\n");  
+        return ;  
+    }
+    if (totalBytes == fileStat.st_size) {
+        printf("文件已全部发送完毕！\n");  
+        s_is_send_finished = 1;
+    }
+
     int numBytes = 0;
     fseek(fp, totalBytes, SEEK_SET);
     while ((numBytes = fread(st_h->buf, sizeof(char), sizeof(st_h->buf), fp)) > 0) {
@@ -213,7 +226,7 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
             //PRINT("nw:%ld\n", nw);
             //st_h->buf_used = 0;
             //lsquic_engine_process_conns(st_h->client_ctx->engine);//会崩溃。。。
-            usleep(4000);
+            //usleep(4000);
             break;
         }
 #if READ_LOCAL_FILE
@@ -560,13 +573,16 @@ int main(int argc, char** argv)
         int ret = client_read_net_data(sockfd);
         if (ret < 0) {
             sleep_time = sleep_time*2;
-            usleep(sleep_time);
         }
         else {
             sleep_time = 1000;
         }
 
         if (sleep_time >= 10*1000*1000) {
+            break;
+        }
+
+        if (s_is_send_finished) {
             break;
         }
 
