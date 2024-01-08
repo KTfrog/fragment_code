@@ -59,12 +59,14 @@ char *get_cur_time()
     return str_time;
 }
 
+#define LISTEN_ADDR "192.168.20.60"
+
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
     struct lsquic_stream_ctx *stream_h;
     struct sockaddr_in *local_addr;
     lsquic_engine_t *engine;
-    int is_client;
+    int is_sender;
 };
 
 struct lsquic_conn_ctx {
@@ -97,7 +99,7 @@ cl_client_on_new_conn (void *stream_if_ctx, lsquic_conn_t *conn)
     g_lsquic_conn_ctx->client_ctx = (struct cl_client_ctx *)stream_if_ctx;
     g_cl_client_ctx->conn_h = g_lsquic_conn_ctx;
     /* Need a stream to send request */
-    if (g_cl_client_ctx->is_client) {
+    if (g_cl_client_ctx->is_sender) {
         PRINT("func:%s, line:%d. lsquic_conn_make_stream\n", __func__, __LINE__);
         lsquic_conn_make_stream(conn);
     }
@@ -126,7 +128,7 @@ cl_client_on_new_stream (void *stream_if_ctx, lsquic_stream_t *stream)
     
     g_cl_client_ctx->stream_h = st_h;
     /*
-    if (g_cl_client_ctx->is_client) {
+    if (g_cl_client_ctx->is_sender) {
         PRINT(">>>> func:%s, line:%d. lsquic_stream_wantwrite(stream, 1)\n", __func__, __LINE__);
         lsquic_stream_wantwrite(stream, 1); // 设置为1后，后面再调用lsquic_engine_process_conns，就会触发 on_write
     }    */
@@ -173,7 +175,7 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 #if READ_LOCAL_FILE
     // 打开文件这些初始化代码应该放在别的位置
     FILE *fp;
-    fp = fopen("video.ts" , "r");
+    fp = fopen("video2.ts" , "r");
     if (fp == NULL) {
         perror("open video.ts failed!\n");
         return;
@@ -190,7 +192,8 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 
     int numBytes = 0;
     fseek(fp, totalBytes, SEEK_SET);
-    while ((numBytes = fread(st_h->buf, sizeof(char), sizeof(st_h->buf), fp)) > 0) {
+    //while ((numBytes = fread(st_h->buf, sizeof(char), sizeof(st_h->buf), fp)) > 0) {
+    if ((numBytes = fread(st_h->buf, sizeof(char), 1316, fp)) > 0) {
         st_h->buf_used = numBytes;
 #endif
         PRINT("st_h->buf_used:%ld\n", st_h->buf_used);
@@ -205,19 +208,26 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 
         if (nw > 0) {
             lsquic_stream_flush(stream); // 多次flush也只能触发一次packets_out
-            /*
+            
+            // diff = 当前时间 - tick触发时间
+            // diff<=0则说明可以立即执行; diff > 0则说明还未到触发时机
             int diff;
             if (lsquic_engine_earliest_adv_tick(g_cl_client_ctx->engine, &diff))
             {
                 PRINT("diff:%d\n", diff);
-                lsquic_engine_process_conns(st_h->client_ctx->engine);
+                if (diff <= 0) {
+                    //lsquic_engine_process_conns(st_h->client_ctx->engine);//h会崩溃
+                }
+                else {
+                    PRINT("adv_tick时机未到，调用lsquic_engine_process_conns可能没有意义\n");
+                }
             }
             else
             {
                 PRINT("FUN[%s]- adv_tick  return abnormal\n", __FUNCTION__);
             }
-            */
-            usleep(1000);
+            
+            //usleep(1000);
         }
         else {
             //client_read_local_data();
@@ -226,8 +236,7 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
             //PRINT("nw:%ld\n", nw);
             //st_h->buf_used = 0;
             //lsquic_engine_process_conns(st_h->client_ctx->engine);//会崩溃。。。
-            //usleep(4000);
-            break;
+            //这里要break;
         }
 #if READ_LOCAL_FILE
     }
@@ -401,9 +410,36 @@ void tut_proc_ancillary (struct msghdr *msg,
     }
 }
 
-int client_read_net_data(int sockfd) 
+int client_read_net_data(int sockfd, long timeout_us) 
 {
     PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+
+    if (timeout_us > 0) {
+        fd_set rfds, efds;
+        int ret;
+        struct timeval  timeVal;
+        FD_ZERO(&rfds);
+        FD_SET(sockfd, &rfds);
+        FD_ZERO(&efds);
+        FD_SET(sockfd, &efds);
+
+        long timeout = timeout_us;//us
+        timeVal.tv_sec = timeout / (1000*1000);
+        timeVal.tv_usec = timeout % (1000*1000);
+        if (timeout < 0)
+        {
+            ret = select(sockfd + 1, &rfds, NULL, &efds, NULL);
+        }
+        else
+        {
+            ret = select(sockfd + 1, &rfds, NULL, &efds, &timeVal);
+        }
+        if (ret < 0 || !FD_ISSET(sockfd, &rfds)) {
+            PRINT("-1 == nread\n");
+            return -1;
+        }
+    }
+
     ssize_t nread;
     struct sockaddr_storage peer_sas;
     unsigned char buf[4096];
@@ -442,8 +478,9 @@ int client_read_net_data(int sockfd)
                                 (struct sockaddr *) local_sas,
                                 (struct sockaddr *) &peer_sas,
                                 NULL, ecn);
-    //the fourth lsquic_engine_process_conns fire both on_new_stream and cl_packets_out
-    printf("\n\n");
+
+    //first to third lsquic_engine_process_conns  fire cl_packets_out
+    //the fourth lsquic_engine_process_conns fire both on_new_stream and hsk_done
     PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
     lsquic_engine_process_conns(g_cl_client_ctx->engine);     
 
@@ -490,7 +527,7 @@ int main(int argc, char** argv)
 {
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     g_cl_client_ctx = malloc(sizeof(*g_cl_client_ctx));
-    g_cl_client_ctx->is_client = 1;
+    g_cl_client_ctx->is_sender = 1;
 
     // {{ create and init socket
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -514,7 +551,7 @@ int main(int argc, char** argv)
     }
     
     struct sockaddr_in peer_addr;
-    new_addr(&peer_addr, "127.0.0.1", 12345);// server addr
+    new_addr(&peer_addr, LISTEN_ADDR, 12345);// server addr
     struct sockaddr_in local_addr;
     local_addr.sin_family = AF_INET;
     local_addr.sin_addr.s_addr = INADDR_ANY; // will notice segmentfault without code of this line
@@ -567,10 +604,11 @@ int main(int argc, char** argv)
     PRINT("func:%s, line:%d. lsquic_engine_process_conns \n", __func__, __LINE__);
     lsquic_engine_process_conns(engine);  // 4. will fire callback fucntion cl_packets_out
     int count = 30;
-    int sleep_time = 1000; // 1ms
+    int sleep_time = 2*1000*1000; // 1ms
     do {
-        usleep(sleep_time); // 1ms
-        int ret = client_read_net_data(sockfd);
+        //usleep(sleep_time); // 1ms
+        int ret = client_read_net_data(sockfd, sleep_time);
+        
         if (ret < 0) {
             sleep_time = sleep_time*2;
         }
@@ -578,21 +616,25 @@ int main(int argc, char** argv)
             sleep_time = 1000;
         }
 
+        // timeout
         if (sleep_time >= 10*1000*1000) {
             break;
         }
+        
 
         if (s_is_send_finished) {
             break;
         }
 
         if (s_is_lsq_hsk_ok) {
-            usleep(1000); // 1ms
+            //usleep(1000); // 1ms
+            sleep_time = 1000;
             PRINT("func:%s, line:%d. lsquic_stream_wantwrite 1\n", __func__, __LINE__);
             lsquic_stream_wantwrite(g_cl_client_ctx->stream_h->stream, 1); // 设置为1后，后面再调用lsquic_engine_process_conns，就会触发 on_write
             PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
             lsquic_engine_process_conns(g_cl_client_ctx->engine); // fire on_write
         }
+        printf("\n\n");
         //count--;
     } while(count>0);
 
