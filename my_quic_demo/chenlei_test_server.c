@@ -61,13 +61,15 @@ char *get_cur_time()
     return str_time;
 }
 
+#define LISTEN_ADDR "192.168.20.60"
+
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
     struct lsquic_stream_ctx *stream_h;
     struct sockaddr_in *local_addr;
     lsquic_engine_t *engine;
     struct ssl_ctx_st   *ssl_ctx;
-    int is_client;
+    int is_sender;
 };
 
 struct lsquic_conn_ctx {
@@ -117,7 +119,7 @@ cl_server_on_new_conn (void *stream_if_ctx, lsquic_conn_t *conn)
     g_lsquic_conn_ctx->client_ctx = (struct cl_client_ctx *)stream_if_ctx;
     g_cl_client_ctx->conn_h = g_lsquic_conn_ctx;
     /* Need a stream to send request */
-    if (g_cl_client_ctx->is_client) {
+    if (g_cl_client_ctx->is_sender) {
         PRINT("func:%s, line:%d. lsquic_conn_make_stream\n", __func__, __LINE__);
         lsquic_conn_make_stream(conn);
     }
@@ -390,7 +392,7 @@ struct ssl_ctx_st* cl_lookup_cert(void *lsquic_cert_lookup_ctx, const struct soc
 
 struct ssl_ctx_st* cl_get_ssl_ctx(void *peer_ctx, const struct sockaddr *local)
 {
-    PRINT(">>>> func:%s, line:%d\n", __func__, __LINE__);
+    PRINT(">>>> func:%s, line:%d. peer_ctx:%p\n", __func__, __LINE__, peer_ctx);
     //struct cl_client_ctx* handle = (struct cl_client_ctx*)peer_ctx;
     //m_certs_map->ce_ssl_ctx;
     return g_cl_client_ctx->ssl_ctx;
@@ -507,6 +509,31 @@ void tut_proc_ancillary (struct msghdr *msg,
 int server_read_net_data(int sockfd) 
 {
     PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+
+    fd_set rfds, efds;
+	int ret;
+	struct timeval  timeVal;
+    FD_ZERO(&rfds);
+	FD_SET(sockfd, &rfds);
+	FD_ZERO(&efds);
+	FD_SET(sockfd, &efds);
+
+    long timeout = 2000;//ms
+	timeVal.tv_sec = timeout / 1000;
+	timeVal.tv_usec = (timeout % 1000) * 1000;
+	if (timeout < 0)
+	{
+		ret = select(sockfd + 1, &rfds, NULL, &efds, NULL);
+	}
+	else
+	{
+		ret = select(sockfd + 1, &rfds, NULL, &efds, &timeVal);
+	}
+    if (ret < 0 || !FD_ISSET(sockfd, &rfds)) {
+        PRINT("-1 == nread\n");
+        return -1;
+    }
+
     ssize_t nread;
     struct sockaddr_storage peer_sas;
     unsigned char buf[4096];
@@ -583,7 +610,7 @@ int main(int argc, char** argv)
 {
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     g_cl_client_ctx = malloc(sizeof(*g_cl_client_ctx));
-    g_cl_client_ctx->is_client = 0;
+    g_cl_client_ctx->is_sender = 0;
     m_certs_map = (certs_map_t*)malloc(sizeof(certs_map_t));
     //m_certs_map->ce_ssl_ctx = (struct ssl_ctx_t*)malloc(sizeof(struct ssl_ctx_t));
 
@@ -611,7 +638,7 @@ int main(int argc, char** argv)
     
     //struct sockaddr_in peer_addr;
     struct sockaddr_in local_addr;
-    new_addr(&local_addr, "127.0.0.1", 12345);//
+    new_addr(&local_addr, LISTEN_ADDR, 12345);//
     g_cl_client_ctx->local_addr = &local_addr;
     socklen_t socklen = sizeof(local_addr);
     if (0 != bind(sockfd, (struct sockaddr *) &local_addr, socklen))
@@ -682,10 +709,10 @@ int main(int argc, char** argv)
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
 
 
-    int count = 30;
+    int count = 10;
     int sleep_time = 1000; // 1ms
     do {
-        usleep(sleep_time); // 1ms
+        //usleep(sleep_time); // 1ms, use select, no not need usleep
         int ret = server_read_net_data(sockfd);
         if (ret < 0) {
             sleep_time = sleep_time*2;
