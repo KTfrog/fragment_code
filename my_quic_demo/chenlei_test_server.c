@@ -20,6 +20,7 @@
 #include "lsquic.h"
 
 #include <openssl/ssl.h>
+#include <event2/event.h>
 //#include "test_common.h"
 //#include "prog.h"
 #include "../src/liblsquic/lsquic_logger.h"
@@ -70,6 +71,9 @@ struct cl_client_ctx {
     lsquic_engine_t *engine;
     struct ssl_ctx_st   *ssl_ctx;
     int is_sender;
+    int sockfd;
+    struct event* ev_sock;
+    struct event* prog_timer;
 };
 
 struct lsquic_conn_ctx {
@@ -162,7 +166,7 @@ cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
     size_t nr;
 
     nr = lsquic_stream_read(stream, buf, sizeof(buf));
-    PRINT(">>>> func:%s, line:%d. Read frome peer,nr:%ld\n", __func__, __LINE__, nr);
+    PRINT(">>>> func:%s, line:%d. Read from peer, nr:%ld\n", __func__, __LINE__, nr);
     if (0 == nr)
     {
         lsquic_stream_shutdown(stream, 2);
@@ -506,12 +510,53 @@ void tut_proc_ancillary (struct msghdr *msg,
     }
 }
 
-int server_read_net_data(int sockfd) 
+void
+cl_process_conns (struct cl_client_ctx *prog)
 {
-    PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+    
+    PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
+    int diff;
+    struct timeval timeout;
 
-    fd_set rfds, efds;
+    lsquic_engine_process_conns(prog->engine);
+
+    if (lsquic_engine_earliest_adv_tick(prog->engine, &diff))
+    {
+        if (diff < 0
+                /*|| (unsigned) diff < prog->prog_settings.es_clock_granularity*/)
+        {
+            timeout.tv_sec  = 0;
+            timeout.tv_usec = 0;//prog->prog_settings.es_clock_granularity;
+        }
+        else
+        {
+            timeout.tv_sec = (unsigned) diff / 1000000;
+            timeout.tv_usec = (unsigned) diff % 1000000;
+        }
+        PRINT("func:%s, line:%d. diff:%d\n", __func__, __LINE__, diff);
+        //if (!prog_is_stopped())
+            event_add(prog->prog_timer, &timeout);
+    }
+}
+
+static void
+process_conns_timer_handler (int fd, short what, void *arg)
+{
+    //if (!prog_is_stopped())
+        cl_process_conns(arg);
+}
+
+static int process_conns_onley_once = 0;
+int 
+server_read_net_data(void* arg)
+{
+    PRINT("func:%s, line:%d. arg:%p\n", __func__, __LINE__, arg);
+    struct cl_client_ctx* client_ctx = (struct cl_client_ctx*)arg;
+    int sockfd = client_ctx->sockfd;
+    
 	int ret;
+/*用libevent，这里就没用了
+    fd_set rfds, efds;
 	struct timeval  timeVal;
     FD_ZERO(&rfds);
 	FD_SET(sockfd, &rfds);
@@ -533,7 +578,7 @@ int server_read_net_data(int sockfd)
         PRINT("-1 == nread\n");
         return -1;
     }
-
+*/
     ssize_t nread;
     struct sockaddr_storage peer_sas;
     unsigned char buf[4096];
@@ -555,31 +600,25 @@ int server_read_net_data(int sockfd)
     }
     PRINT("socket receive_size %ld\n", nread);
     
-    struct sockaddr_storage* local_sas = (struct sockaddr_storage*)g_cl_client_ctx->local_addr;
+    struct sockaddr_storage* local_sas = (struct sockaddr_storage*)client_ctx->local_addr;
     // TODO handle ECN properly
     int ecn = 0;
     tut_proc_ancillary(&msg, local_sas, &ecn);
     PRINT("func:%s, line:%d. lsquic_engine_packet_in\n", __func__, __LINE__);
-    lsquic_engine_packet_in(g_cl_client_ctx->engine, buf, nread,
+    ret = lsquic_engine_packet_in(client_ctx->engine, buf, nread,
                                 (struct sockaddr *) local_sas,
                                 (struct sockaddr *) &peer_sas,
                                 NULL, ecn);
     //the fourth lsquic_engine_process_conns fire both on_new_stream and cl_packets_out
-    printf("\n\n");
-    PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
-    lsquic_engine_process_conns(g_cl_client_ctx->engine);     
-
-    // lsquic_engine_earliest_adv_tick没什么用目前看
-    int diff;
-    if (lsquic_engine_earliest_adv_tick(g_cl_client_ctx->engine, &diff))
-    {
-        PRINT("diff:%d\n", diff);
-    }
-    else
-    {
-        PRINT("FUN[%s]- adv_tick  return abnormal\n", __FUNCTION__);
+    if (ret != -1) {
+        cl_process_conns(client_ctx);
     }
     return nread;
+}
+
+static void read_net_data(evutil_socket_t fd, short flags, void* arg) 
+{
+    server_read_net_data(arg);
 }
 
 void client_read_local_data() 
@@ -620,6 +659,7 @@ int main(int argc, char** argv)
         PRINT("create socket failed!");
         return -1;
     }
+    g_cl_client_ctx->sockfd = sockfd;
 
     if(0 != set_fd_nonblocking(sockfd) )
     // if(0 != set_fd_nonblocking(sockfd) )
@@ -706,31 +746,45 @@ int main(int argc, char** argv)
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     lsquic_engine_t *engine = lsquic_engine_new(LSENG_SERVER, &engine_api); // client mode
     g_cl_client_ctx->engine = engine;
-    PRINT("func:%s, line:%d\n", __func__, __LINE__);
 
-
-    int count = 10;
-    int sleep_time = 1000; // 1ms
-    do {
-        //usleep(sleep_time); // 1ms, use select, no not need usleep
-        int ret = server_read_net_data(sockfd);
-        if (ret < 0) {
-            sleep_time = sleep_time*2;
-            if (sleep_time >= 2000000) {
-                sleep_time = 2000000;
-                count--;
-            }
-        }
-        else {
-            sleep_time = 1000;
-        }
-    } while(count>0);
+    PRINT("func:%s, line:%d. g_cl_client_ctx:%p\n", __func__, __LINE__, g_cl_client_ctx);
+    // 1 创建base
+    struct event_base* base = event_base_new();
+    // 2 event_new
+    struct event* ev_sock =    event_new(base, g_cl_client_ctx->sockfd, EV_READ|EV_PERSIST, read_net_data, g_cl_client_ctx);
+    struct event* prog_timer = event_new(base, -1, 0, process_conns_timer_handler, g_cl_client_ctx);
+    g_cl_client_ctx->prog_timer = prog_timer;
+    g_cl_client_ctx->ev_sock = ev_sock;
+    // 3 event_add
+    event_add(ev_sock, NULL); //机顶盒可以设置2秒超时
+    // 4, event_base_dispatch(base); //进入循环中
+    PRINT("func:%s, line:%d. event_base_loop\n", __func__, __LINE__);
+    event_base_loop(base, 0);
+    // 5
+    //event_base_loopbreak(); //强行退出
 
 
 finish:
     PRINT("func:%s, line:%d. finish\n", __func__, __LINE__);
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
+
+    // 5 {{event_base_loopexit(); //最后一个时间回调函数执行完退出
+    if (prog_timer)
+    {
+        event_del(prog_timer);
+        event_free(prog_timer);
+        prog_timer = NULL;
+    }
+    if (ev_sock)
+    {
+        event_del(ev_sock);
+        event_free(ev_sock);
+        ev_sock = NULL;
+    }
+    event_base_free(base);
+    //}}
+
     close(sockfd);
     lsquic_global_cleanup();
     return 0;
