@@ -36,7 +36,10 @@
 #define CTL_SZ (CMSG_SPACE(DST_MSG_SZ) + ECN_SZ)
 
 
-#define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
+#define LOG_PRINT_TIMES   200
+static int log_times = LOG_PRINT_TIMES;
+#define PRINT(fmt, ...) if (log_times>0) {log_times--;printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__);}
+#define LOGI(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 char *get_cur_time()
 {
@@ -86,6 +89,7 @@ lsquic_conn_ctx_t* g_lsquic_conn_ctx;
 struct cl_client_ctx* g_cl_client_ctx;
 static int s_is_lsq_hsk_ok = 0;
 static int s_is_send_finished = 0;
+static FILE *fp = NULL;
 void client_read_local_data();
 
 static lsquic_conn_ctx_t *
@@ -173,20 +177,17 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
     client_read_local_data();
 #endif
 #if READ_LOCAL_FILE
-    // 打开文件这些初始化代码应该放在别的位置
-    FILE *fp;
-    fp = fopen("video2.ts" , "r");
     if (fp == NULL) {
         perror("open video.ts failed!\n");
         return;
     }
     struct stat fileStat;
     if (fstat(fileno(fp), &fileStat) == -1) {  
-        printf("获取文件状态失败\n");  
+        LOGI("获取文件状态失败\n");  
         return ;  
     }
     if (totalBytes == fileStat.st_size) {
-        printf("文件已全部发送完毕！\n");  
+        LOGI("文件已全部发送完毕！totalBytes:%d\n", totalBytes);  
         s_is_send_finished = 1;
     }
 
@@ -242,7 +243,6 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
     }
 #endif
     PRINT("totalBytes:%d\n", totalBytes);
-    fclose(fp);
 
     lsquic_stream_wantwrite(stream, 0); // 多次调用也只能触发一次packets_out
     //ev_io_start(tmpClientState->loop, &tmpClientState->read_local_data_ev);// 异步启动监听标准输入
@@ -593,7 +593,7 @@ int main(int argc, char** argv)
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     lsquic_engine_t *engine = lsquic_engine_new(0, &engine_api); // client mode
     g_cl_client_ctx->engine = engine;
-    PRINT("func:%s, line:%d\n", __func__, __LINE__);
+    LOGI("func:%s, line:%d. begin\n", __func__, __LINE__);
     // 2 , LSQVER_I001/LSQVER_I002
     lsquic_engine_connect(engine, LSQVER_I001, (struct sockaddr *) &local_addr, (struct sockaddr *) &peer_addr, 
                             (void *) &sockfd, NULL, NULL, 0, 
@@ -603,10 +603,13 @@ int main(int argc, char** argv)
     // 3
     PRINT("func:%s, line:%d. lsquic_engine_process_conns \n", __func__, __LINE__);
     lsquic_engine_process_conns(engine);  // 4. will fire callback fucntion cl_packets_out
+#if READ_LOCAL_FILE
+    // 打开文件这些初始化代码应该放在别的位置
+    fp = fopen("video.ts" , "r");
+#endif
     int count = 30;
-    int sleep_time = 2*1000*1000; // 1ms
+    int sleep_time = 2*1000*1000; // 握手期间超时设置2秒
     do {
-        //usleep(sleep_time); // 1ms
         int ret = client_read_net_data(sockfd, sleep_time);
         
         if (ret < 0) {
@@ -627,19 +630,21 @@ int main(int argc, char** argv)
         }
 
         if (s_is_lsq_hsk_ok) {
-            //usleep(1000); // 1ms
-            sleep_time = 1000;
+            sleep_time = 1000; // 发送数据期间超时设置1毫秒
             PRINT("func:%s, line:%d. lsquic_stream_wantwrite 1\n", __func__, __LINE__);
             lsquic_stream_wantwrite(g_cl_client_ctx->stream_h->stream, 1); // 设置为1后，后面再调用lsquic_engine_process_conns，就会触发 on_write
             PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
             lsquic_engine_process_conns(g_cl_client_ctx->engine); // fire on_write
         }
-        printf("\n\n");
+        PRINT("\n\n");
         //count--;
     } while(count>0);
 
 finish:
-    PRINT("func:%s, line:%d. finish\n", __func__, __LINE__);
+    LOGI("func:%s, line:%d. finish\n", __func__, __LINE__);
+    if (fp) {
+        fclose(fp);
+    }
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
     close(sockfd);

@@ -72,6 +72,7 @@ struct cl_client_ctx {
     struct ssl_ctx_st   *ssl_ctx;
     int is_sender;
     int sockfd;
+    struct event_base* base;
     struct event* ev_sock;
     struct event* prog_timer;
 };
@@ -511,7 +512,7 @@ void tut_proc_ancillary (struct msghdr *msg,
 }
 
 void
-cl_process_conns (struct cl_client_ctx *prog)
+prog_process_conns (struct cl_client_ctx *prog)
 {
     
     PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
@@ -534,7 +535,7 @@ cl_process_conns (struct cl_client_ctx *prog)
             timeout.tv_usec = (unsigned) diff % 1000000;
         }
         PRINT("func:%s, line:%d. diff:%d\n", __func__, __LINE__, diff);
-        //if (!prog_is_stopped())
+        if (prog->prog_timer)
             event_add(prog->prog_timer, &timeout);
     }
 }
@@ -543,7 +544,7 @@ static void
 process_conns_timer_handler (int fd, short what, void *arg)
 {
     //if (!prog_is_stopped())
-        cl_process_conns(arg);
+        prog_process_conns(arg);
 }
 
 static int process_conns_onley_once = 0;
@@ -596,6 +597,7 @@ server_read_net_data(void* arg)
     nread = recvmsg(sockfd, &msg, 0);
     if (-1 == nread) {
         PRINT("-1 == nread\n");
+        prog_stop();
         return -1;
     }
     PRINT("socket receive_size %ld\n", nread);
@@ -611,7 +613,7 @@ server_read_net_data(void* arg)
                                 NULL, ecn);
     //the fourth lsquic_engine_process_conns fire both on_new_stream and cl_packets_out
     if (ret != -1) {
-        cl_process_conns(client_ctx);
+        prog_process_conns(client_ctx);
     }
     return nread;
 }
@@ -643,6 +645,23 @@ void client_read_local_data()
     lsquic_stream_wantwrite(stream_h->stream, 1);
     PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
     lsquic_engine_process_conns(g_cl_client_ctx->engine); 
+}
+
+void prog_stop() {
+#if 1
+    event_base_loopbreak(g_cl_client_ctx->base);
+#else
+    if (g_cl_client_ctx->ev_sock) {
+        event_del(g_cl_client_ctx->ev_sock);
+        event_free(g_cl_client_ctx->ev_sock);
+        g_cl_client_ctx->ev_sock = NULL;
+    }
+    if (g_cl_client_ctx->prog_timer) {
+        event_del(g_cl_client_ctx->prog_timer);
+        event_free(g_cl_client_ctx->prog_timer);
+        g_cl_client_ctx->prog_timer = NULL;
+    }
+#endif
 }
 
 int main(int argc, char** argv)
@@ -750,13 +769,17 @@ int main(int argc, char** argv)
     PRINT("func:%s, line:%d. g_cl_client_ctx:%p\n", __func__, __LINE__, g_cl_client_ctx);
     // 1 创建base
     struct event_base* base = event_base_new();
+    g_cl_client_ctx->base = base;
     // 2 event_new
     struct event* ev_sock =    event_new(base, g_cl_client_ctx->sockfd, EV_READ|EV_PERSIST, read_net_data, g_cl_client_ctx);
     struct event* prog_timer = event_new(base, -1, 0, process_conns_timer_handler, g_cl_client_ctx);
     g_cl_client_ctx->prog_timer = prog_timer;
     g_cl_client_ctx->ev_sock = ev_sock;
     // 3 event_add
-    event_add(ev_sock, NULL); //机顶盒可以设置2秒超时
+    struct timeval timeout;
+    timeout.tv_sec = 10; // 秒为单位
+    timeout.tv_usec = 0; // 微秒为单位，这里设置为0，表示不使用微秒
+    event_add(ev_sock, &timeout); //机顶盒可以设置2秒超时
     // 4, event_base_dispatch(base); //进入循环中
     PRINT("func:%s, line:%d. event_base_loop\n", __func__, __LINE__);
     event_base_loop(base, 0);
