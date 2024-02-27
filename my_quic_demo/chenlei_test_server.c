@@ -40,6 +40,7 @@
 
 
 #define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
+#define PRINTD(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 char *get_cur_time()
 {
@@ -521,22 +522,24 @@ prog_process_conns (struct cl_client_ctx *prog)
 
     lsquic_engine_process_conns(prog->engine);
 
+    // diff = 当前时间 - tick触发时间
+    // diff<=0则说明可以立即执行; diff > 0则说明还未到触发时机
     if (lsquic_engine_earliest_adv_tick(prog->engine, &diff))
     {
         if (diff < 0
-                /*|| (unsigned) diff < prog->prog_settings.es_clock_granularity*/)
+                || (unsigned) diff < LSQUIC_DF_CLOCK_GRANULARITY)
         {
             timeout.tv_sec  = 0;
-            timeout.tv_usec = 0;//prog->prog_settings.es_clock_granularity;
+            timeout.tv_usec = LSQUIC_DF_CLOCK_GRANULARITY;//prog->prog_settings.es_clock_granularity;
         }
         else
         {
             timeout.tv_sec = (unsigned) diff / 1000000;
             timeout.tv_usec = (unsigned) diff % 1000000;
         }
-        PRINT("func:%s, line:%d. diff:%d\n", __func__, __LINE__, diff);
+        PRINT("func:%s, line:%d. diff:%d\n\n", __func__, __LINE__, diff);
         if (prog->prog_timer)
-            event_add(prog->prog_timer, &timeout);
+            event_add(prog->prog_timer, &timeout);//之前的timout会被覆盖，不用担心会有多个timer
     }
 }
 
@@ -545,6 +548,23 @@ process_conns_timer_handler (int fd, short what, void *arg)
 {
     //if (!prog_is_stopped())
         prog_process_conns(arg);
+}
+
+void prog_stop() {
+#if 1
+    event_base_loopbreak(g_cl_client_ctx->base);
+#else
+    if (g_cl_client_ctx->ev_sock) {
+        event_del(g_cl_client_ctx->ev_sock);
+        event_free(g_cl_client_ctx->ev_sock);
+        g_cl_client_ctx->ev_sock = NULL;
+    }
+    if (g_cl_client_ctx->prog_timer) {
+        event_del(g_cl_client_ctx->prog_timer);
+        event_free(g_cl_client_ctx->prog_timer);
+        g_cl_client_ctx->prog_timer = NULL;
+    }
+#endif
 }
 
 static int process_conns_onley_once = 0;
@@ -647,23 +667,6 @@ void client_read_local_data()
     lsquic_engine_process_conns(g_cl_client_ctx->engine); 
 }
 
-void prog_stop() {
-#if 1
-    event_base_loopbreak(g_cl_client_ctx->base);
-#else
-    if (g_cl_client_ctx->ev_sock) {
-        event_del(g_cl_client_ctx->ev_sock);
-        event_free(g_cl_client_ctx->ev_sock);
-        g_cl_client_ctx->ev_sock = NULL;
-    }
-    if (g_cl_client_ctx->prog_timer) {
-        event_del(g_cl_client_ctx->prog_timer);
-        event_free(g_cl_client_ctx->prog_timer);
-        g_cl_client_ctx->prog_timer = NULL;
-    }
-#endif
-}
-
 int main(int argc, char** argv)
 {
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
@@ -678,7 +681,6 @@ int main(int argc, char** argv)
         PRINT("create socket failed!");
         return -1;
     }
-    g_cl_client_ctx->sockfd = sockfd;
 
     if(0 != set_fd_nonblocking(sockfd) )
     // if(0 != set_fd_nonblocking(sockfd) )
@@ -706,6 +708,7 @@ int main(int argc, char** argv)
         return -1;
     }
     // }}
+    g_cl_client_ctx->sockfd = sockfd;
 
 #if 1
     //TODO: init ssl
@@ -788,7 +791,7 @@ int main(int argc, char** argv)
 
 
 finish:
-    PRINT("func:%s, line:%d. finish\n", __func__, __LINE__);
+    PRINTD("func:%s, line:%d. finish\n", __func__, __LINE__);
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
 

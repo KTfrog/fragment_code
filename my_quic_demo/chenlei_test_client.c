@@ -18,6 +18,7 @@
 #include <error.h>
 
 #include "lsquic.h"
+#include <event2/event.h>
 //#include "test_common.h"
 //#include "prog.h"
 #include "../src/liblsquic/lsquic_logger.h"
@@ -39,6 +40,7 @@
 #define LOG_PRINT_TIMES   200
 static int log_times = LOG_PRINT_TIMES;
 #define PRINT(fmt, ...) if (log_times>0) {log_times--;printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__);}
+#define PRINTD(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
 #define LOGI(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 char *get_cur_time()
@@ -70,6 +72,10 @@ struct cl_client_ctx {
     struct sockaddr_in *local_addr;
     lsquic_engine_t *engine;
     int is_sender;
+    int sockfd;
+    struct event_base* base;
+    struct event* ev_sock;
+    struct event* prog_timer;
 };
 
 struct lsquic_conn_ctx {
@@ -91,6 +97,7 @@ static int s_is_lsq_hsk_ok = 0;
 static int s_is_send_finished = 0;
 static FILE *fp = NULL;
 void client_read_local_data();
+void client_prog_stop();
 
 static lsquic_conn_ctx_t *
 cl_client_on_new_conn (void *stream_if_ctx, lsquic_conn_t *conn)
@@ -131,11 +138,11 @@ cl_client_on_new_stream (void *stream_if_ctx, lsquic_stream_t *stream)
     st_h->buf_used = 0;
     
     g_cl_client_ctx->stream_h = st_h;
-    /*
+    
     if (g_cl_client_ctx->is_sender) {
         PRINT(">>>> func:%s, line:%d. lsquic_stream_wantwrite(stream, 1)\n", __func__, __LINE__);
         lsquic_stream_wantwrite(stream, 1); // 设置为1后，后面再调用lsquic_engine_process_conns，就会触发 on_write
-    }    */
+    }
     return st_h;
 }
 
@@ -187,8 +194,10 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
         return ;  
     }
     if (totalBytes == fileStat.st_size) {
-        LOGI("文件已全部发送完毕！totalBytes:%d\n", totalBytes);  
+        //LOGI("文件已全部发送完毕！totalBytes:%d\n", totalBytes);  
         s_is_send_finished = 1;
+        //client_prog_stop();
+        return;
     }
 
     int numBytes = 0;
@@ -209,34 +218,10 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 
         if (nw > 0) {
             lsquic_stream_flush(stream); // 多次flush也只能触发一次packets_out
-            
-            // diff = 当前时间 - tick触发时间
-            // diff<=0则说明可以立即执行; diff > 0则说明还未到触发时机
-            int diff;
-            if (lsquic_engine_earliest_adv_tick(g_cl_client_ctx->engine, &diff))
-            {
-                PRINT("diff:%d\n", diff);
-                if (diff <= 0) {
-                    //lsquic_engine_process_conns(st_h->client_ctx->engine);//h会崩溃
-                }
-                else {
-                    PRINT("adv_tick时机未到，调用lsquic_engine_process_conns可能没有意义\n");
-                }
-            }
-            else
-            {
-                PRINT("FUN[%s]- adv_tick  return abnormal\n", __FUNCTION__);
-            }
-            
             //usleep(1000);
         }
         else {
-            //client_read_local_data();
-            PRINT("func:%s, line:%d. lsquic_stream_write. st_h->buf:[%s], len:%ld\n", __func__, __LINE__, st_h->buf, strlen(st_h->buf));
-            //nw = lsquic_stream_write(stream, st_h->buf, strlen(st_h->buf));
-            //PRINT("nw:%ld\n", nw);
-            //st_h->buf_used = 0;
-            //lsquic_engine_process_conns(st_h->client_ctx->engine);//会崩溃。。。
+            //lsquic_engine_process_conns(st_h->client_ctx->engine);//会崩溃。。。不能在回调函数内部调用它，不可重入
             //这里要break;
         }
 #if READ_LOCAL_FILE
@@ -244,9 +229,8 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 #endif
     PRINT("totalBytes:%d\n", totalBytes);
 
-    lsquic_stream_wantwrite(stream, 0); // 多次调用也只能触发一次packets_out
-    //ev_io_start(tmpClientState->loop, &tmpClientState->read_local_data_ev);// 异步启动监听标准输入
-    lsquic_stream_wantread(stream, 1);
+    //lsquic_stream_wantwrite(stream, 0); // 多次调用也只能触发一次packets_out
+    //lsquic_stream_wantread(stream, 1);
     // end 触发packets_out
     PRINT(">>>> func:%s, line:%d. end!!!!\n", __func__, __LINE__);
 }
@@ -261,7 +245,6 @@ cl_client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
         case LSQ_HSK_OK:
         case LSQ_HSK_RESUMED_OK:
             PRINT("handshake successful, start stdin watcher\n");
-            //client_read_local_data();
             s_is_lsq_hsk_ok = 1;
             break;
         default:
@@ -328,7 +311,7 @@ int cl_packets_out(
             break;
         }
     }
-    PRINT("func:%s, line:%d. n=%d\n\n\n", __func__, __LINE__, n);
+    PRINT("func:%s, line:%d. n=%d\n", __func__, __LINE__, n);
     return (int) n;
 }
 
@@ -410,10 +393,70 @@ void tut_proc_ancillary (struct msghdr *msg,
     }
 }
 
-int client_read_net_data(int sockfd, long timeout_us) 
+void
+prog_process_conns (struct cl_client_ctx *prog)
 {
-    PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+    
+    PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
+    int diff;
+    struct timeval timeout;
 
+    lsquic_engine_process_conns(prog->engine);
+
+    // diff = 当前时间 - tick触发时间
+    // diff<=0则说明可以立即执行; diff > 0则说明还未到触发时机
+    if (lsquic_engine_earliest_adv_tick(prog->engine, &diff))
+    {
+        if (diff < 0
+                || (unsigned) diff < LSQUIC_DF_CLOCK_GRANULARITY)
+        {
+            timeout.tv_sec  = 0;
+            timeout.tv_usec = LSQUIC_DF_CLOCK_GRANULARITY;//prog->prog_settings.es_clock_granularity;
+        }
+        else
+        {
+            timeout.tv_sec = (unsigned) diff / 1000000;
+            timeout.tv_usec = (unsigned) diff % 1000000;
+        }
+        PRINT("func:%s, line:%d. diff:%d\n\n", __func__, __LINE__, diff);
+        if (prog->prog_timer)
+            event_add(prog->prog_timer, &timeout);//之前的timout会被覆盖，不用担心会有多个timer
+    }
+}
+
+static void
+process_conns_timer_handler (int fd, short what, void *arg)
+{
+    //if (!prog_is_stopped())
+        prog_process_conns(arg);
+}
+
+void client_prog_stop() {
+#if 1
+    event_base_loopbreak(g_cl_client_ctx->base);
+#else
+    if (g_cl_client_ctx->ev_sock) {
+        event_del(g_cl_client_ctx->ev_sock);
+        event_free(g_cl_client_ctx->ev_sock);
+        g_cl_client_ctx->ev_sock = NULL;
+    }
+    if (g_cl_client_ctx->prog_timer) {
+        event_del(g_cl_client_ctx->prog_timer);
+        event_free(g_cl_client_ctx->prog_timer);
+        g_cl_client_ctx->prog_timer = NULL;
+    }
+#endif
+}
+
+//int client_read_net_data(int sockfd, long timeout_us) 
+int 
+client_read_net_data(void* arg)
+{
+    PRINT("func:%s, line:%d. arg:%p\n", __func__, __LINE__, arg);
+    struct cl_client_ctx* client_ctx = (struct cl_client_ctx*)arg;
+    int sockfd = client_ctx->sockfd;
+
+/*用libevent，这里就没用了
     if (timeout_us > 0) {
         fd_set rfds, efds;
         int ret;
@@ -439,7 +482,7 @@ int client_read_net_data(int sockfd, long timeout_us)
             return -1;
         }
     }
-
+*/
     ssize_t nread;
     struct sockaddr_storage peer_sas;
     unsigned char buf[4096];
@@ -457,9 +500,10 @@ int client_read_net_data(int sockfd, long timeout_us)
     nread = recvmsg(sockfd, &msg, 0);
     if (-1 == nread) {
         PRINT("-1 == nread\n");
+        //prog_stop();
         return -1;
     }
-    PRINT("socket receive_size %ld\n", nread);
+    PRINTD("socket receive_size %ld\n", nread);
     // int i = 0;
     // for (i = 0; i < nread; i++) {
     //     PRINT("%2x ", buf[i]);
@@ -469,31 +513,28 @@ int client_read_net_data(int sockfd, long timeout_us)
     // }
     // PRINT("\n");
     
-    struct sockaddr_storage* local_sas = (struct sockaddr_storage*)g_cl_client_ctx->local_addr;
+    struct sockaddr_storage* local_sas = (struct sockaddr_storage*)client_ctx->local_addr;
     // TODO handle ECN properly
     int ecn = 0;
     tut_proc_ancillary(&msg, local_sas, &ecn);
     PRINT("func:%s, line:%d. lsquic_engine_packet_in\n", __func__, __LINE__);
-    lsquic_engine_packet_in(g_cl_client_ctx->engine, buf, nread,
+    lsquic_engine_packet_in(client_ctx->engine, buf, nread,
                                 (struct sockaddr *) local_sas,
                                 (struct sockaddr *) &peer_sas,
                                 NULL, ecn);
 
     //first to third lsquic_engine_process_conns  fire cl_packets_out
     //the fourth lsquic_engine_process_conns fire both on_new_stream and hsk_done
-    PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
-    lsquic_engine_process_conns(g_cl_client_ctx->engine);     
+	
+    prog_process_conns(client_ctx);     
 
-    int diff;
-    if (lsquic_engine_earliest_adv_tick(g_cl_client_ctx->engine, &diff))
-    {
-        PRINT("diff:%d\n", diff);
-    }
-    else
-    {
-        PRINT("FUN[%s]- adv_tick  return abnormal\n", __FUNCTION__);
-    }
+
     return nread;
+}
+
+static void read_net_data(evutil_socket_t fd, short flags, void* arg) 
+{
+    client_read_net_data(arg);
 }
 
 void client_read_local_data() 
@@ -563,6 +604,7 @@ int main(int argc, char** argv)
         return -1;
     }
     // }}
+    g_cl_client_ctx->sockfd = sockfd;
 
     //TODO: init ssl
     //init_ssl_ctx();
@@ -571,82 +613,94 @@ int main(int argc, char** argv)
     struct lsquic_engine_settings   engine_settings;
     memset(&engine_settings, 0, sizeof(engine_settings));
     engine_settings.es_ecn      = LSQUIC_DF_ECN;
-    lsquic_engine_init_settings(&engine_settings, 0);
+    lsquic_engine_init_settings(&engine_settings, LSQVER_I001);
     // 1
     if (0 != lsquic_global_init(LSQUIC_GLOBAL_CLIENT))
     {
         exit(EXIT_FAILURE);
     }
+    char err_buf[100] = {0};
+    if (0 != lsquic_engine_check_settings(&engine_settings, LSQVER_I001, err_buf, sizeof(err_buf)))
+    {
+        PRINT("###### Error in settings: %s\n", err_buf);
+        return -1;
+    }
 
     struct lsquic_engine_api engine_api;
     memset(&engine_api, 0, sizeof(engine_api));
     // client must implement three functions of engine_api
-    engine_api.ea_lookup_cert = cl_lookup_cert;
     engine_api.ea_stream_if     = &g_lsquic_stream_if;
     engine_api.ea_packets_out = cl_packets_out;
     // ea_packets_out_ctx对应ea_packets_out函数的第一个参数，就是你传的是什么句柄，到时候给你返回什么句柄，这个句柄你可以自定义类型
     engine_api.ea_packets_out_ctx = (void*)(uintptr_t)sockfd; // 64位系统typedef unsigned long int uintptr_t， 解决warnning, uintptr_t大小和指针大小才匹配
+    //server
+    engine_api.ea_lookup_cert = cl_lookup_cert;
     // optional
     engine_api.ea_settings = &engine_settings;
-    engine_api.ea_alpn = "echo";// 没发现有什么用
+    engine_api.ea_alpn = "echo";// 没发现有什么用,因为server端写死了
 
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     lsquic_engine_t *engine = lsquic_engine_new(0, &engine_api); // client mode
     g_cl_client_ctx->engine = engine;
+
+#if READ_LOCAL_FILE
+    // 打开文件这些初始化代码应该放在别的位置
+    fp = fopen("video.ts" , "r");
+#endif
+
+    
     LOGI("func:%s, line:%d. begin\n", __func__, __LINE__);
     // 2 , LSQVER_I001/LSQVER_I002
     lsquic_engine_connect(engine, LSQVER_I001, (struct sockaddr *) &local_addr, (struct sockaddr *) &peer_addr, 
                             (void *) &sockfd, NULL, NULL, 0, 
                             NULL, 0, NULL, 0);
-
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
     // 3
-    PRINT("func:%s, line:%d. lsquic_engine_process_conns \n", __func__, __LINE__);
-    lsquic_engine_process_conns(engine);  // 4. will fire callback fucntion cl_packets_out
-#if READ_LOCAL_FILE
-    // 打开文件这些初始化代码应该放在别的位置
-    fp = fopen("video.ts" , "r");
-#endif
-    int count = 30;
-    int sleep_time = 2*1000*1000; // 握手期间超时设置2秒
-    do {
-        int ret = client_read_net_data(sockfd, sleep_time);
-        
-        if (ret < 0) {
-            sleep_time = sleep_time*2;
-        }
-        else {
-            sleep_time = 1000;
-        }
+    prog_process_conns(g_cl_client_ctx);  // 4. will fire callback fucntion cl_packets_out
 
-        // timeout
-        if (sleep_time >= 10*1000*1000) {
-            break;
-        }
-        
+    PRINT("func:%s, line:%d. g_cl_client_ctx:%p\n", __func__, __LINE__, g_cl_client_ctx);
+    // 1 创建base
+    struct event_base* base = event_base_new();
+    g_cl_client_ctx->base = base;
+    // 2 event_new
+    struct event* ev_sock =    event_new(base, g_cl_client_ctx->sockfd, EV_READ|EV_PERSIST, read_net_data, g_cl_client_ctx);
+    struct event* prog_timer = event_new(base, -1, 0, process_conns_timer_handler, g_cl_client_ctx);
+    g_cl_client_ctx->prog_timer = prog_timer;
+    g_cl_client_ctx->ev_sock = ev_sock;
+    // 3 event_add
+    struct timeval timeout;
+    timeout.tv_sec = 10; // 秒为单位
+    timeout.tv_usec = 0; // 微秒为单位，这里设置为0，表示不使用微秒
+    event_add(ev_sock, &timeout); //机顶盒可以设置2秒超时
 
-        if (s_is_send_finished) {
-            break;
-        }
-
-        if (s_is_lsq_hsk_ok) {
-            sleep_time = 1000; // 发送数据期间超时设置1毫秒
-            PRINT("func:%s, line:%d. lsquic_stream_wantwrite 1\n", __func__, __LINE__);
-            lsquic_stream_wantwrite(g_cl_client_ctx->stream_h->stream, 1); // 设置为1后，后面再调用lsquic_engine_process_conns，就会触发 on_write
-            PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
-            lsquic_engine_process_conns(g_cl_client_ctx->engine); // fire on_write
-        }
-        PRINT("\n\n");
-        //count--;
-    } while(count>0);
+    // 4, event_base_dispatch(base); //进入循环中
+    PRINT("func:%s, line:%d. event_base_loop\n", __func__, __LINE__);
+    event_base_loop(base, 0);
 
 finish:
-    LOGI("func:%s, line:%d. finish\n", __func__, __LINE__);
+    PRINTD("func:%s, line:%d. finish\n", __func__, __LINE__);
     if (fp) {
         fclose(fp);
     }
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
+
+    // 5 {{event_base_loopexit(); //最后一个时间回调函数执行完退出
+    if (prog_timer)
+    {
+        event_del(prog_timer);
+        event_free(prog_timer);
+        prog_timer = NULL;
+    }
+    if (ev_sock)
+    {
+        event_del(ev_sock);
+        event_free(ev_sock);
+        ev_sock = NULL;
+    }
+    event_base_free(base);
+    //}}
+
     close(sockfd);
     lsquic_global_cleanup();
     return 0;
