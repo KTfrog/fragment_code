@@ -64,6 +64,7 @@ char *get_cur_time()
 }
 
 #define LISTEN_ADDR "192.168.20.60"
+#define RTP_MAX 1316
 
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
@@ -164,11 +165,10 @@ static void
 cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 {
     //PRINT(">>>> func:%s, line:%d\n", __func__, __LINE__);
-    char buf[1500] = {0};
+    char buf[RTP_MAX] = {0};
     size_t nr;
 
     nr = lsquic_stream_read(stream, buf, sizeof(buf));
-    PRINT(">>>> func:%s, line:%d. Read from peer, nr:%ld\n", __func__, __LINE__, nr);
     if (0 == nr)
     {
         lsquic_stream_shutdown(stream, 2);
@@ -177,7 +177,7 @@ cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
     }
     saveFile(buf, nr);
     totalBytes = totalBytes + nr;
-    PRINT(">>>> func:%s, line:%d. totalBytes:%d\n", __func__, __LINE__, totalBytes);
+    PRINT(">>>> func:%s, line:%d. nr:%ld, totalBytes:%d\n", __func__, __LINE__, nr, totalBytes);
 
     //lsquic_stream_wantread(stream, 0);
     //lsquic_stream_wantwrite(stream, 1);
@@ -424,13 +424,13 @@ int cl_packets_out(
         msg.msg_namelen    = sizeof(struct sockaddr_in);
         msg.msg_iov        = out_spec[n].iov;
         msg.msg_iovlen     = out_spec[n].iovlen;
-        PRINT("msg_iov[%d].iov_len:%ld\n", n, msg.msg_iov[n].iov_len);
+        //PRINT("msg_iov[%d].iov_len:%ld\n", n, msg.msg_iov[n].iov_len);
         if (sendmsg(sockfd, &msg, 0) < 0) {
             PRINT("func:%s, line:%d. sendmsg < 0\n", __func__, __LINE__);
             break;
         }
     }
-    PRINT("func:%s, line:%d. n=%d\n\n\n", __func__, __LINE__, n);
+    //PRINT("func:%s, line:%d. n=%d\n\n\n", __func__, __LINE__, n);
     return (int) n;
 }
 
@@ -472,7 +472,7 @@ int set_fd_blocking (int fd)
 void tut_proc_ancillary (struct msghdr *msg, 
                             struct sockaddr_storage *storage, int *ecn)
 {
-    PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+    //PRINT("func:%s, line:%d. \n", __func__, __LINE__);
     //const struct in6_pktinfo *in6_pkt;
     struct cmsghdr *cmsg;
 

@@ -7,6 +7,8 @@
 #include <string.h>
 #include <sys/queue.h>
 #include <sys/time.h>
+#include <pthread.h>
+#include <assert.h>
 //socket
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -36,13 +38,12 @@
 /* Amount of space required for incoming ancillary data */
 #define CTL_SZ (CMSG_SPACE(DST_MSG_SZ) + ECN_SZ)
 
-
 #define LOG_PRINT_TIMES   200
 static int log_times = LOG_PRINT_TIMES;
 #define PRINT(fmt, ...) if (log_times>0) {log_times--;printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__);}
 #define PRINTD(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
 #define LOGI(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
-#define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
+#define LOGE(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 char *get_cur_time()
 {
     static char str_time[32] = {0};
@@ -65,6 +66,9 @@ char *get_cur_time()
 }
 
 #define LISTEN_ADDR "192.168.20.60"
+#define RING_BUFFER_NODE_NUM 10000
+#define MTU_MAX 2000
+#define RTP_SIZE 1316
 
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
@@ -91,13 +95,105 @@ struct lsquic_stream_ctx {
     size_t               buf_used;   /* 已使用的buffer大小 */
 };
 
+// 定义链表节点结构体
+typedef struct Node {
+    char buf[MTU_MAX];
+    size_t buffer_size; /* write_buf_used 已使用的buffer大小 */
+    struct Node *next;
+} Node;
+
+// 环形缓冲区结构体定义（使用Node作为单位）
+typedef struct RingBuffer {
+    Node *head;      // 头结点
+    Node *tail;      // 尾结点
+    size_t capacity; // 总节点数（即总缓冲区大小除以MTU_MAX）
+} RingBuffer;
+
 lsquic_conn_ctx_t* g_lsquic_conn_ctx;
 struct cl_client_ctx* g_cl_client_ctx;
 static int s_is_lsq_hsk_ok = 0;
-static int s_is_send_finished = 0;
+//static int s_is_send_finished = 0;
 static FILE *fp = NULL;
 void client_read_local_data();
 void client_prog_stop();
+
+static Node s_all_nodes[RING_BUFFER_NODE_NUM];
+static RingBuffer* g_rb = NULL;
+
+// 初始化环形缓冲区
+void ring_buffer_init(RingBuffer* rb, Node* nodes, size_t num_nodes) {
+    if (num_nodes == 0 || nodes == NULL) return;
+    
+    rb->capacity = num_nodes;
+    rb->head = rb->tail = nodes;
+
+    PRINT("1 ring_buffer_init(), rb->head->buffer_size:%lu\n", rb->head->buffer_size);
+    //PRINT(">>ring_buffer_init(), i=%lu, &nodes[i]:%p, nodes+i:%p\n", i, &nodes[i], nodes+i);
+    for (size_t i = 0; i < num_nodes - 1; i++) {
+        nodes[i].next = &nodes[i + 1];
+        nodes[i].buffer_size = 0;
+    }
+    nodes[num_nodes - 1].next = &nodes[0]; // 链成一个循环链表
+}
+
+// 判断环形缓冲区是否为空
+int ring_buffer_is_empty(const RingBuffer* rb) {
+    //return rb->head->buffer_size == 0 && rb->head == rb->tail;
+    return rb->head->buffer_size == 0 || rb->head == rb->tail;
+}
+
+// 判断环形缓冲区是否已满
+int ring_buffer_is_full(const RingBuffer* rb) {
+    return !ring_buffer_is_empty(rb) && rb->tail->next == rb->head;
+}
+
+// 写入数据到环形缓冲区
+int ring_buffer_write(RingBuffer* rb, const void* data, size_t data_size) {
+    //if (data_size > MTU_MAX || ring_buffer_is_full(rb)) return false;
+
+    //PRINT("ring_buffer_write(), data_size:%lu\n", data_size);
+    //TODO:如果写满了怎么办,先加个断言
+    if (ring_buffer_is_full(rb)) {
+        PRINTD("ring_buffer_is_full !!");
+    }
+    assert(!ring_buffer_is_full(rb));
+    Node *current = rb->tail;// tail = write point
+    if (data_size > 0) {
+        size_t copy_size = MTU_MAX - current->buffer_size;
+        if (copy_size > data_size) copy_size = data_size;
+        
+        memcpy(current->buf, data, copy_size);
+        current->buffer_size = copy_size;
+        rb->tail = current->next;
+    }
+
+    return 1;
+}
+
+// 从环形缓冲区读取数据
+size_t ring_buffer_read(RingBuffer* rb, void* dest, size_t dest_size) {
+    if (rb == NULL || dest_size > MTU_MAX || ring_buffer_is_empty(rb)) return 0;
+
+    Node *current = rb->head; // head = read point
+    if (current->buffer_size == 0) {
+        return 0;
+    }
+
+    size_t copy_size = current->buffer_size;
+    if (dest_size > 0) {
+        if (copy_size > dest_size) {
+            copy_size = dest_size;
+        }
+
+        memcpy(dest, current->buf, copy_size);
+
+        current->buffer_size = 0;
+        rb->head = current->next;
+    }
+
+    return copy_size;
+}
+
 
 static lsquic_conn_ctx_t *
 cl_client_on_new_conn (void *stream_if_ctx, lsquic_conn_t *conn)
@@ -171,62 +267,52 @@ static void
 cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 {
     //PRINT(">>>> func:%s, line:%d. stream:%p\n", __func__, __LINE__, stream);
-    ssize_t nw = 0;
-    //int i = 0;
-    //for (i = 0; i < 2; i++)  // 在这for循环也只能触发一次packets_out
-#if 0//test_common
-    if (strlen(st_h->buf) == 0) {
-        strcpy(st_h->buf, "chenlei\n");
-        st_h->buf_used = strlen(st_h->buf);
+    static char static_buf[MTU_MAX] = {0};
+    static size_t num_bytes_sent_so_far = 0;
+    static size_t num_bytes_remaining_to_send = 0;
+    char* buf = static_buf;
+    size_t buf_size = 0;
+
+    // 上一个RTP buf没发完
+    if (num_bytes_remaining_to_send > 0) {
+        buf = &static_buf[num_bytes_sent_so_far];
+        buf_size = num_bytes_remaining_to_send;
     }
-#endif
-#if 0
-    client_read_local_data();
-#endif
-#if READ_LOCAL_FILE
-    if (fp == NULL) {
-        perror("open video.ts failed!\n");
-        return;
-    }
-    struct stat fileStat;
-    if (fstat(fileno(fp), &fileStat) == -1) {  
-        LOGI("获取文件状态失败\n");  
-        return ;  
-    }
-    if (totalBytes == fileStat.st_size) {
-        //LOGI("文件已全部发送完毕！totalBytes:%d\n", totalBytes);  
-        s_is_send_finished = 1;
-        //client_prog_stop();
-        return;
+    else {
+        buf_size = ring_buffer_read(g_rb, buf, MTU_MAX);
     }
 
-    int numBytes = 0;
-    fseek(fp, totalBytes, SEEK_SET);
-    //while ((numBytes = fread(st_h->buf, sizeof(char), sizeof(st_h->buf), fp)) > 0) {
-    if ((numBytes = fread(st_h->buf, sizeof(char), 1316, fp)) > 0) {
-        st_h->buf_used = numBytes;
-#endif
-        PRINT("st_h->buf_used:%ld\n", st_h->buf_used);
-        nw = lsquic_stream_write(stream, st_h->buf, st_h->buf_used);
-        totalBytes += nw;
-        PRINT("nw:%ld\n", nw);
-        st_h->buf_used = 0;
-        memset(st_h->buf, 0, sizeof(st_h->buf));
-        /* Here we make an assumption that we can write the whole buffer.
-        * Don't do it in a real program.
-        */
-
-        if (nw > 0) {
-            lsquic_stream_flush(stream); // 多次flush也只能触发一次packets_out
-            //usleep(1000);
+    PRINT(">>>> func:%s, line:%d. buf_size:%ld\n", __func__, __LINE__, buf_size);
+    //assert (buf_size == 0 || buf_size == RTP_SIZE);//最后一个包既不是0也不是1316
+    if (buf_size > 0) {
+        ssize_t nw = lsquic_stream_write(stream, buf, buf_size);
+        totalBytes = totalBytes + nw;
+        PRINT(">>>> func:%s, line:%d. nw:%zd, totalBytes:%d\n", __func__, __LINE__, nw, totalBytes);
+        //nw为0的情况，整个RTP包丢了是可以接受的，不会导致整个流乱掉
+        //nw>0但是又不等于buf_size情况，要把剩余的buf重新发一下
+        //只有程序开始的时候有这种情况buf_size != nw，后面nw只有0
+        if (nw <= 0) {
+            PRINT(">>>> func:%s, line:%d. buf_size:%ld, nw:%zd\n", __func__, __LINE__, buf_size, nw);
+            return ;//break;
+        }
+        else if (nw < buf_size) {
+            PRINTD(">>>> func:%s, line:%d. buf_size:%ld, nw:%zd\n", __func__, __LINE__, buf_size, nw);
+            num_bytes_sent_so_far = num_bytes_sent_so_far + nw;
+            num_bytes_remaining_to_send = buf_size - nw;
         }
         else {
-            //lsquic_engine_process_conns(st_h->client_ctx->engine);//会崩溃。。。不能在回调函数内部调用它，不可重入
-            //这里要break;
+            // flush就是表示可以发送了，但是并不是前面write的每个buf就会被打包成一个个packet
+            // 感觉这些buf最终都还是存在engine统一的缓存里，发送的时候并不会按一个个的buf，一个packet这样发送
+            // 而是全部的buf总体，再切割成一个个的UDP发送
+            num_bytes_sent_so_far = 0;
+            num_bytes_remaining_to_send = 0;
+            int ret = lsquic_stream_flush(stream);
+            assert(ret == 0);
         }
-#if READ_LOCAL_FILE
     }
-#endif
+    else {
+        return;//break;
+    }
     //PRINT("totalBytes:%d\n", totalBytes);
 
     //lsquic_stream_wantwrite(stream, 0); // 多次调用也只能触发一次packets_out
@@ -291,7 +377,7 @@ int cl_packets_out(
     unsigned                       n_packets_out
 ) 
 {
-    PRINTD(">>>> func:%s, line:%d. n_packets_out:%d\n", __func__, __LINE__, n_packets_out);
+    PRINT(">>>> func:%s, line:%d. n_packets_out:%d\n", __func__, __LINE__, n_packets_out);
     struct msghdr msg;
     int sockfd;
     unsigned n;
@@ -311,7 +397,7 @@ int cl_packets_out(
             break;
         }
     }
-    PRINT("func:%s, line:%d. n=%d\n", __func__, __LINE__, n);
+    //PRINT("func:%s, line:%d. n=%d\n", __func__, __LINE__, n);
     return (int) n;
 }
 
@@ -353,7 +439,7 @@ int set_fd_blocking (int fd)
 void tut_proc_ancillary (struct msghdr *msg, 
                             struct sockaddr_storage *storage, int *ecn)
 {
-    PRINT("func:%s, line:%d. \n", __func__, __LINE__);
+    //PRINT("func:%s, line:%d. \n", __func__, __LINE__);
     //const struct in6_pktinfo *in6_pkt;
     struct cmsghdr *cmsg;
 
@@ -564,6 +650,60 @@ void client_read_local_data()
     }
 }
 
+void* thread_function(void* arg)
+{
+    char buf[MTU_MAX];
+    int numBytes = 0;
+    while ((numBytes = fread(buf, sizeof(char), RTP_SIZE, fp)) > 0) {
+        if (numBytes != RTP_SIZE) {
+            PRINTD("write to ringbuffer:%d\n", numBytes);
+        }
+        //nw = lsquic_stream_write(stream, st_h->buf, st_h->buf_used);
+        ring_buffer_write(g_rb, buf, numBytes);
+        usleep(1300);
+    }
+    PRINTD("文件已全部发送完毕！\n");  
+#if 0
+    struct stat fileStat;
+    if (fstat(fileno(fp), &fileStat) == -1) {  
+        LOGI("获取文件状态失败\n");  
+        return ;  
+    }
+    if (totalBytes == fileStat.st_size) {
+        //LOGI("文件已全部发送完毕！totalBytes:%d\n", totalBytes);  
+        s_is_send_finished = 1;
+        //client_prog_stop();
+        return;
+    }
+    fseek(fp, totalBytes, SEEK_SET);
+#endif
+    return NULL;
+}
+void read_file_thread()
+{
+    // 创建线程属性
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        perror("Error initializing thread attributes");
+        exit(EXIT_FAILURE);
+    }
+
+    // 创建并启动一个新线程
+    pthread_t thread_id;
+    if (pthread_create(&thread_id, &attr, thread_function, NULL) != 0) {
+        perror("Error creating thread");
+        exit(EXIT_FAILURE);
+    }
+    PRINT("func:%s, line:%d. create thread ok \n", __func__, __LINE__);
+}
+
+int log_buf(void *logger_ctx, const char *buf, size_t len)
+{
+    struct cl_client_ctx* cl_client_ctx = (struct cl_client_ctx *)logger_ctx;
+    printf("logbuf:%s\n", buf);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     PRINT("func:%s, line:%d\n", __func__, __LINE__);
@@ -606,9 +746,12 @@ int main(int argc, char** argv)
     // }}
     g_cl_client_ctx->sockfd = sockfd;
 
-    //TODO: init ssl
-    //init_ssl_ctx();
-
+#if 0
+    // init log level
+    static struct lsquic_logger_if m_logger_if; // 没有static，程序会崩溃
+    m_logger_if.log_buf = log_buf;
+    lsquic_logger_init(&m_logger_if, (void*)g_cl_client_ctx, LLTS_YYYYMMDD_HHMMSSUS);//LLTS_YYYYMMDD_HHMMSSUS,LLTS_CHROMELIKE
+#endif
     // begin init quic
     struct lsquic_engine_settings   engine_settings;
     memset(&engine_settings, 0, sizeof(engine_settings));
@@ -646,8 +789,17 @@ int main(int argc, char** argv)
 
 #if READ_LOCAL_FILE
     // 打开文件这些初始化代码应该放在别的位置
-    fp = fopen("video.ts" , "r");
+    fp = fopen("iptv_hd_mini.ts" , "r");
+    if (fp == NULL) {
+        perror("fopen failed!");
+        return -1;
+    }
 #endif
+
+    RingBuffer rb;
+    g_rb = &rb;
+    ring_buffer_init(g_rb, s_all_nodes, RING_BUFFER_NODE_NUM);
+    read_file_thread();
 
     
     LOGI("func:%s, line:%d. begin\n", __func__, __LINE__);
@@ -679,7 +831,7 @@ int main(int argc, char** argv)
     event_base_loop(base, 0);
 
 finish:
-    PRINTD("func:%s, line:%d. finish\n", __func__, __LINE__);
+    PRINTD("func:%s, line:%d. finish. totalBytes:%d\n", __func__, __LINE__, totalBytes);
     if (fp) {
         fclose(fp);
     }
