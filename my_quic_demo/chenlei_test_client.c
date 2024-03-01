@@ -170,7 +170,7 @@ static int totalBytes = 0;
 static void
 cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 {
-    PRINT(">>>> func:%s, line:%d. stream:%p\n", __func__, __LINE__, stream);
+    //PRINT(">>>> func:%s, line:%d. stream:%p\n", __func__, __LINE__, stream);
     ssize_t nw = 0;
     //int i = 0;
     //for (i = 0; i < 2; i++)  // 在这for循环也只能触发一次packets_out
@@ -227,12 +227,12 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 #if READ_LOCAL_FILE
     }
 #endif
-    PRINT("totalBytes:%d\n", totalBytes);
+    //PRINT("totalBytes:%d\n", totalBytes);
 
     //lsquic_stream_wantwrite(stream, 0); // 多次调用也只能触发一次packets_out
     //lsquic_stream_wantread(stream, 1);
     // end 触发packets_out
-    PRINT(">>>> func:%s, line:%d. end!!!!\n", __func__, __LINE__);
+    //PRINT(">>>> func:%s, line:%d. end!!!!\n", __func__, __LINE__);
 }
 
 static void
@@ -291,7 +291,7 @@ int cl_packets_out(
     unsigned                       n_packets_out
 ) 
 {
-    PRINT(">>>> func:%s, line:%d. n_packets_out:%d\n", __func__, __LINE__, n_packets_out);
+    PRINTD(">>>> func:%s, line:%d. n_packets_out:%d\n", __func__, __LINE__, n_packets_out);
     struct msghdr msg;
     int sockfd;
     unsigned n;
@@ -500,10 +500,10 @@ client_read_net_data(void* arg)
     nread = recvmsg(sockfd, &msg, 0);
     if (-1 == nread) {
         PRINT("-1 == nread\n");
-        //prog_stop();
+        client_prog_stop();
         return -1;
     }
-    PRINTD("socket receive_size %ld\n", nread);
+    PRINT("socket receive_size %ld\n", nread);
     // int i = 0;
     // for (i = 0; i < nread; i++) {
     //     PRINT("%2x ", buf[i]);
@@ -612,8 +612,9 @@ int main(int argc, char** argv)
     // begin init quic
     struct lsquic_engine_settings   engine_settings;
     memset(&engine_settings, 0, sizeof(engine_settings));
-    engine_settings.es_ecn      = LSQUIC_DF_ECN;
     lsquic_engine_init_settings(&engine_settings, LSQVER_I001);
+    engine_settings.es_ecn      = LSQUIC_DF_ECN;
+    engine_settings.es_cc_algo  = 1; //1:  Cubic   2:  BBRv1
     // 1
     if (0 != lsquic_global_init(LSQUIC_GLOBAL_CLIENT))
     {
@@ -670,7 +671,7 @@ int main(int argc, char** argv)
     // 3 event_add
     struct timeval timeout;
     timeout.tv_sec = 10; // 秒为单位
-    timeout.tv_usec = 0; // 微秒为单位，这里设置为0，表示不使用微秒
+    timeout.tv_usec = 0; // 微秒为单位
     event_add(ev_sock, &timeout); //机顶盒可以设置2秒超时
 
     // 4, event_base_dispatch(base); //进入循环中

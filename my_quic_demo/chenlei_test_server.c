@@ -163,7 +163,7 @@ cl_server_on_new_stream (void *stream_if_ctx, lsquic_stream_t *stream)
 static void
 cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 {
-    PRINT(">>>> func:%s, line:%d\n", __func__, __LINE__);
+    //PRINT(">>>> func:%s, line:%d\n", __func__, __LINE__);
     char buf[1500] = {0};
     size_t nr;
 
@@ -181,7 +181,7 @@ cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 
     //lsquic_stream_wantread(stream, 0);
     //lsquic_stream_wantwrite(stream, 1);
-    PRINT(">>>> func:%s, line:%d. cl_server_on_read end!\n", __func__, __LINE__);
+    //PRINT(">>>> func:%s, line:%d. cl_server_on_read end!\n", __func__, __LINE__);
 }
 
 static void
@@ -571,7 +571,7 @@ static int process_conns_onley_once = 0;
 int 
 server_read_net_data(void* arg)
 {
-    PRINT("func:%s, line:%d. arg:%p\n", __func__, __LINE__, arg);
+    //PRINT("func:%s, line:%d. arg:%p\n", __func__, __LINE__, arg);
     struct cl_client_ctx* client_ctx = (struct cl_client_ctx*)arg;
     int sockfd = client_ctx->sockfd;
     
@@ -626,7 +626,7 @@ server_read_net_data(void* arg)
     // TODO handle ECN properly
     int ecn = 0;
     tut_proc_ancillary(&msg, local_sas, &ecn);
-    PRINT("func:%s, line:%d. lsquic_engine_packet_in\n", __func__, __LINE__);
+    //PRINT("func:%s, line:%d. lsquic_engine_packet_in\n", __func__, __LINE__);
     ret = lsquic_engine_packet_in(client_ctx->engine, buf, nread,
                                 (struct sockaddr *) local_sas,
                                 (struct sockaddr *) &peer_sas,
@@ -785,13 +785,18 @@ int main(int argc, char** argv)
     event_add(ev_sock, &timeout); //机顶盒可以设置2秒超时
     // 4, event_base_dispatch(base); //进入循环中
     PRINT("func:%s, line:%d. event_base_loop\n", __func__, __LINE__);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    long long start_time = tv.tv_sec * 1000000 + tv.tv_usec;
     event_base_loop(base, 0);
     // 5
     //event_base_loopbreak(); //强行退出
 
 
 finish:
-    PRINTD("func:%s, line:%d. finish\n", __func__, __LINE__);
+    gettimeofday(&tv, NULL);
+    long long end_time = tv.tv_sec * 1000000 + tv.tv_usec;
+    PRINTD("func:%s, line:%d. finish. end-start:%lld\n", __func__, __LINE__, end_time-start_time);
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
 
