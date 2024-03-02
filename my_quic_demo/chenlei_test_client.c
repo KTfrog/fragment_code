@@ -69,6 +69,7 @@ char *get_cur_time()
 #define RING_BUFFER_NODE_NUM 10000
 #define MTU_MAX 2000
 #define RTP_SIZE 1316
+#define SAVE_FILE 1
 
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
@@ -114,6 +115,17 @@ struct cl_client_ctx* g_cl_client_ctx;
 static int s_is_lsq_hsk_ok = 0;
 //static int s_is_send_finished = 0;
 static FILE *fp = NULL;
+
+static FILE* save_fp = NULL;
+static void saveFile(char* buf, int size) 
+{
+    if (save_fp == NULL) {
+        PRINT("open server_save_file failed!\n");
+        return ;
+    }
+    fwrite(buf, sizeof(char), size, save_fp);
+}
+
 void client_read_local_data();
 void client_prog_stop();
 
@@ -228,6 +240,7 @@ static lsquic_stream_ctx_t *
 cl_client_on_new_stream (void *stream_if_ctx, lsquic_stream_t *stream)
 {
     PRINT(">>>> func:%s, line:%d. On new stream\n", __func__, __LINE__);
+
     lsquic_stream_ctx_t *st_h = calloc(1, sizeof(*st_h));
     st_h->stream = stream;
     st_h->client_ctx = stream_if_ctx;
@@ -282,23 +295,24 @@ cl_client_on_write (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
         buf_size = ring_buffer_read(g_rb, buf, MTU_MAX);
     }
 
-    PRINT(">>>> func:%s, line:%d. buf_size:%ld\n", __func__, __LINE__, buf_size);
-    //assert (buf_size == 0 || buf_size == RTP_SIZE);//最后一个包既不是0也不是1316
+    //PRINT(">>>> func:%s, line:%d. buf_size:%ld\n", __func__, __LINE__, buf_size);
+
     if (buf_size > 0) {
         ssize_t nw = lsquic_stream_write(stream, buf, buf_size);
+        assert(nw >= 0);
+#if SAVE_FILE
+        saveFile(buf, nw);
+#endif
         totalBytes = totalBytes + nw;
         PRINT(">>>> func:%s, line:%d. nw:%zd, totalBytes:%d\n", __func__, __LINE__, nw, totalBytes);
         //nw为0的情况，整个RTP包丢了是可以接受的，不会导致整个流乱掉
         //nw>0但是又不等于buf_size情况，要把剩余的buf重新发一下
         //只有程序开始的时候有这种情况buf_size != nw，后面nw只有0
-        if (nw <= 0) {
-            PRINT(">>>> func:%s, line:%d. buf_size:%ld, nw:%zd\n", __func__, __LINE__, buf_size, nw);
-            return ;//break;
-        }
-        else if (nw < buf_size) {
+        if (nw < (ssize_t)buf_size) {
             PRINTD(">>>> func:%s, line:%d. buf_size:%ld, nw:%zd\n", __func__, __LINE__, buf_size, nw);
             num_bytes_sent_so_far = num_bytes_sent_so_far + nw;
             num_bytes_remaining_to_send = buf_size - nw;
+            return;
         }
         else {
             // flush就是表示可以发送了，但是并不是前面write的每个buf就会被打包成一个个packet
@@ -655,10 +669,18 @@ void* thread_function(void* arg)
     char buf[MTU_MAX];
     int numBytes = 0;
     while ((numBytes = fread(buf, sizeof(char), RTP_SIZE, fp)) > 0) {
+    //while ((numBytes = fread(buf + 4, sizeof(char), RTP_SIZE, fp)) > 0) {
         if (numBytes != RTP_SIZE) {
-            PRINTD("write to ringbuffer:%d\n", numBytes);
+            PRINTD("write to ringbuffer:%d\n", numBytes);//564
         }
-        //nw = lsquic_stream_write(stream, st_h->buf, st_h->buf_used);
+#if 0
+        // 从ringbuffer读一个RTP包，先写4个字节的RTSP头，告诉RTP包有多长
+        buf[0] = 0x24;
+        buf[1] = 0x00;
+        buf[2] = (numBytes >> 8) & 0XFF; // 取高8位
+        buf[3] = numBytes & 0xFF; // 取低8位
+        numBytes = numBytes+4;
+#endif
         ring_buffer_write(g_rb, buf, numBytes);
         usleep(1300);
     }
@@ -699,7 +721,7 @@ void read_file_thread()
 
 int log_buf(void *logger_ctx, const char *buf, size_t len)
 {
-    struct cl_client_ctx* cl_client_ctx = (struct cl_client_ctx *)logger_ctx;
+    //struct cl_client_ctx* cl_client_ctx = (struct cl_client_ctx *)logger_ctx;
     printf("logbuf:%s\n", buf);
     return 0;
 }
@@ -795,6 +817,13 @@ int main(int argc, char** argv)
         return -1;
     }
 #endif
+#if SAVE_FILE
+    save_fp = fopen("sender_save_file.ts", "wb");
+    if (save_fp == NULL) {
+        perror("fopen failed!");
+        return -1;
+    }
+#endif
 
     RingBuffer rb;
     g_rb = &rb;
@@ -834,6 +863,9 @@ finish:
     PRINTD("func:%s, line:%d. finish. totalBytes:%d\n", __func__, __LINE__, totalBytes);
     if (fp) {
         fclose(fp);
+    }
+    if (save_fp) {
+        fclose(save_fp);
     }
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/queue.h>
 #include <sys/time.h>
+#include <assert.h>
 //socket
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -39,9 +40,12 @@
 #define CTL_SZ (CMSG_SPACE(DST_MSG_SZ) + ECN_SZ)
 
 
-#define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
+#define LOG_PRINT_TIMES   200
+static int log_times = LOG_PRINT_TIMES;
+#define PRINT(fmt, ...) if (log_times>0) {log_times--;printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__);}
 #define PRINTD(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
-#define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
+#define LOGI(fmt, ...) printf("%s   " fmt, get_cur_time(), ##__VA_ARGS__)
+#define LOGE(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 char *get_cur_time()
 {
     static char str_time[32] = {0};
@@ -64,7 +68,10 @@ char *get_cur_time()
 }
 
 #define LISTEN_ADDR "192.168.20.60"
-#define RTP_MAX 1316
+#define MTU_MAX 2000
+#define RTP_SIZE 1316
+#define RTSP_HEADER_SIZE 4
+#define SAVE_FILE 1
 
 struct cl_client_ctx {
     struct lsquic_conn_ctx  *conn_h;
@@ -165,19 +172,48 @@ static void
 cl_server_on_read (lsquic_stream_t *stream, lsquic_stream_ctx_t *st_h)
 {
     //PRINT(">>>> func:%s, line:%d\n", __func__, __LINE__);
-    char buf[RTP_MAX] = {0};
-    size_t nr;
+#if 0
+    // {{先把RTSP header读完整，得到一个RTP包的size
+    char prefix[RTSP_HEADER_SIZE] = {0};
+    static int i_prefix = 0;
+    int next_read_size = 0;
+    nr = lsquic_stream_read(stream, prefix + i_prefix, RTSP_HEADER_SIZE - i_prefix);
+    saveFile(prefix + i_prefix, nr);
+    i_prefix = i_prefix + nr;
+    if (i_prefix < RTSP_HEADER_SIZE) {
+        return;
+    }
 
-    nr = lsquic_stream_read(stream, buf, sizeof(buf));
+    //}}
+#endif
+    size_t nr;
+    static char static_buf[RTP_SIZE] = {0};
+    static size_t pkg_read_size = 0;
+    char* buf = &static_buf[pkg_read_size];
+
+    size_t buf_size = RTP_SIZE - pkg_read_size;
+    nr = lsquic_stream_read(stream, buf, buf_size);
+#if SAVE_FILE
+    saveFile(buf, nr);
+#endif
+    totalBytes = totalBytes + nr;
+    PRINT(">>>> func:%s, line:%d. nr:%ld, totalBytes:%d\n", __func__, __LINE__, nr, totalBytes);
     if (0 == nr)
     {
         lsquic_stream_shutdown(stream, 2);
         //lsquic_conn_make_stream(tmpClientState->conn);
         return;
     }
-    saveFile(buf, nr);
-    totalBytes = totalBytes + nr;
-    PRINT(">>>> func:%s, line:%d. nr:%ld, totalBytes:%d\n", __func__, __LINE__, nr, totalBytes);
+    else if (nr < buf_size) {
+        PRINTD(">>>> func:%s, line:%d. buf_size:%ld, nw:%zd\n", __func__, __LINE__, buf_size, nr);
+        pkg_read_size = pkg_read_size + nr;
+    }
+    else {
+        // flush就是表示可以发送了，但是并不是前面write的每个buf就会被打包成一个个packet
+        // 感觉这些buf最终都还是存在engine统一的缓存里，发送的时候并不会按一个个的buf，一个packet这样发送
+        // 而是全部的buf总体，再切割成一个个的UDP发送
+        pkg_read_size = 0;
+    }
 
     //lsquic_stream_wantread(stream, 0);
     //lsquic_stream_wantwrite(stream, 1);
@@ -516,7 +552,7 @@ void
 prog_process_conns (struct cl_client_ctx *prog)
 {
     
-    PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
+    //PRINT("func:%s, line:%d. lsquic_engine_process_conns\n", __func__, __LINE__);
     int diff;
     struct timeval timeout;
 
@@ -567,7 +603,6 @@ void prog_stop() {
 #endif
 }
 
-static int process_conns_onley_once = 0;
 int 
 server_read_net_data(void* arg)
 {
@@ -796,7 +831,7 @@ int main(int argc, char** argv)
 finish:
     gettimeofday(&tv, NULL);
     long long end_time = tv.tv_sec * 1000000 + tv.tv_usec;
-    PRINTD("func:%s, line:%d. finish. end-start:%lld\n", __func__, __LINE__, end_time-start_time);
+    PRINTD("func:%s, line:%d. finish. end-start:%lld. totalBytes:%d\n", __func__, __LINE__, end_time-start_time, totalBytes);
     lsquic_stream_shutdown(g_cl_client_ctx->stream_h->stream, 0);
     sleep(2);
 
